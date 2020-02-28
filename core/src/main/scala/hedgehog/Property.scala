@@ -1,6 +1,7 @@
 package hedgehog
 
 import hedgehog.core._
+import hedgehog.predef.Monad
 
 trait PropertyTOps extends PropertyTReporting {
 
@@ -35,9 +36,15 @@ trait PropertyTOps extends PropertyTReporting {
     writeLog(Error(e)).flatMap(_ => failureA[A])
 
   def check(config: PropertyConfig, p: PropertyT[Result], seed: Seed): Report =
-    propertyT.report(config, None, seed, p)
+    propertyT.report[predef.Identity](config, None, seed, p.map(predef.Identity(_))).value
 
   def checkRandom(config: PropertyConfig, p: PropertyT[Result]): Report =
     // FIX: predef MonadIO
     check(config, p, Seed.fromTime())
+
+  def checkF[F[_]: Monad](config: PropertyConfig, p: PropertyT[F[Result]], seed: Seed): F[Report] =
+    propertyT.report(config, None, seed, p)
+
+  def checkRandomF[F[_]: Monad](config: PropertyConfig, p: PropertyT[F[Result]]): F[Report] =
+    checkF(config, p, Seed.fromTime())
 }

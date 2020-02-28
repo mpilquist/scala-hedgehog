@@ -131,60 +131,63 @@ object PropertyT {
 
 trait PropertyTReporting {
 
-  @annotation.tailrec
-  final def takeSmallest(n: ShrinkCount, slimit: ShrinkLimit, t: Tree[Option[(List[Log], Option[Result])]]): Status =
+  final def takeSmallest[F[_]](n: ShrinkCount, slimit: ShrinkLimit, t: Tree[Option[(List[Log], Option[F[Result]])]])(implicit F: Monad[F]): F[Status] =
     t.value match {
       case None =>
-        Status.gaveUp
+        F.point(Status.gaveUp)
 
       case Some((w, r)) =>
-        if (r.forall(!_.success)) {
-          if (n.value >= slimit.value) {
-            Status.failed(n, w ++ r.map(_.logs).getOrElse(Nil))
-          } else {
-            findMap(t.children.value)(m =>
-              m.value match {
-                case Some((_, None)) =>
-                  some(m)
-                case Some((_, Some(r2))) =>
-                  if (!r2.success)
-                    some(m)
-                  else
-                    Option.empty
+        F.bind(traverseOpt(r)(identity)) { or =>
+          if (or.forall(!_.success)) {
+            if (n.value >= slimit.value) {
+              F.point(Status.failed(n, w ++ or.map(_.logs).getOrElse(Nil)))
+            } else {
+              val result = findMap(t.children.value)(m =>
+                m.value match {
+                  case Some((_, None)) =>
+                    F.point(some(m))
+                  case Some((_, Some(r2))) =>
+                    F.map(r2) { r2r =>
+                      if (!r2r.success)
+                        some(m)
+                      else
+                        Option.empty[Tree[Option[(List[Log], Option[F[Result]])]]]
+                    }
+                  case None =>
+                    F.point(Option.empty[Tree[Option[(List[Log], Option[F[Result]])]]])
+                }
+              )
+              F.bind(result) {
+                case Some(m) =>
+                  takeSmallest(n.inc, slimit, m)
                 case None =>
-                  Option.empty
+                  F.point(Status.failed(n, w ++ or.map(_.logs).getOrElse(Nil)))
               }
-            ) match {
-              case Some(m) =>
-                takeSmallest(n.inc, slimit, m)
-              case None =>
-                Status.failed(n, w ++ r.map(_.logs).getOrElse(Nil))
             }
+          } else {
+            F.point(Status.ok)
           }
-        } else {
-          Status.ok
         }
     }
 
-  def report(config: PropertyConfig, size0: Option[Size], seed0: Seed, p: PropertyT[Result]): Report = {
+  def report[F[_]](config: PropertyConfig, size0: Option[Size], seed0: Seed, p: PropertyT[F[Result]])(implicit F: Monad[F]): F[Report] = {
     // Increase the size proportionally to the number of tests to ensure better coverage of the desired range
     val sizeInc = Size(Math.max(1, Size.max / config.testLimit.value))
     // Start the size at whatever remainder we have to ensure we run with "max" at least once
     val sizeInit = Size(Size.max % Math.min(config.testLimit.value, Size.max)).incBy(sizeInc)
-    @annotation.tailrec
-    def loop(successes: SuccessCount, discards: DiscardCount, size: Size, seed: Seed, coverage: Coverage[CoverCount]): Report =
+    def loop(successes: SuccessCount, discards: DiscardCount, size: Size, seed: Seed, coverage: Coverage[CoverCount]): F[Report] =
       if (size.value > Size.max)
         loop(successes, discards, sizeInit, seed, coverage)
       else if (successes.value >= config.testLimit.value)
         // we've hit the test limit
         Coverage.split(coverage, successes) match {
           case (_, Nil) =>
-            Report(successes, discards, coverage, OK)
+            F.point(Report(successes, discards, coverage, OK))
           case _ =>
-            Report(successes, discards, coverage, Status.failed(ShrinkCount(0), List("Insufficient coverage.")))
+            F.point(Report(successes, discards, coverage, Status.failed(ShrinkCount(0), List("Insufficient coverage."))))
         }
       else if (discards.value >= config.discardLimit.value)
-        Report(successes, discards, coverage, GaveUp)
+        F.point(Report(successes, discards, coverage, GaveUp))
       else {
         val x =
           try {
@@ -199,20 +202,26 @@ trait PropertyTReporting {
             loop(successes, discards.inc, size.incBy(sizeInc), x.value._1, coverage)
 
           case Some((_, None)) =>
-            Report(successes, discards, coverage, takeSmallest(ShrinkCount(0), config.shrinkLimit, t))
+            F.map(takeSmallest[F](ShrinkCount(0), config.shrinkLimit, t)) { s =>
+              Report(successes, discards, coverage, s)
+            }
 
-          case Some((j, Some(r))) =>
-            if (!r.success){
-              Report(successes, discards, coverage, takeSmallest(ShrinkCount(0), config.shrinkLimit, t))
-            } else
-              loop(successes.inc, discards, size.incBy(sizeInc), x.value._1,
-                Coverage.union(Coverage.count(j.coverage), coverage)(_ + _))
+          case Some((j, Some(fr))) =>
+            F.bind(fr) { r =>
+              if (!r.success){
+                F.map(takeSmallest[F](ShrinkCount(0), config.shrinkLimit, t)) { s =>
+                  Report(successes, discards, coverage, s)
+                }
+              } else
+                loop(successes.inc, discards, size.incBy(sizeInc), x.value._1,
+                  Coverage.union(Coverage.count(j.coverage), coverage)(_ + _))
+            }
         }
       }
     loop(SuccessCount(0), DiscardCount(0), size0.getOrElse(sizeInit), seed0, Coverage.empty)
   }
 
-  def recheck(config: PropertyConfig, size: Size, seed: Seed)(p: PropertyT[Result]): Report =
+  def recheck[F[_]: Monad](config: PropertyConfig, size: Size, seed: Seed)(p: PropertyT[F[Result]]): F[Report] =
     report(config.copy(testLimit = SuccessCount(1)), Some(size), seed, p)
 }
 
