@@ -169,11 +169,37 @@ object GenT extends GenImplicits2 {
       override def bind[A, B](fa: GenT[A])(f: A => GenT[B]): GenT[B] =
         fa.flatMap(f)
 
-      // FIXME: This is not stack safe.
-      override def tailRecM[A, B](a: A)(f: A => GenT[Either[A, B]]): GenT[B] =
-        bind(f(a)) {
-          case Left(value) => tailRecM(value)(f)
-          case Right(value) => point(value)
+      override def tailRecM[A, B](a: A)(f: A => GenT[Either[A, B]]): GenT[B] = {
+        case class Node[C](value: C, childrenCount: Int)
+        @annotation.tailrec
+        def loop(size: Size, remaining: LazyList[Tree[(Seed, Option[Either[A, B]])]], stack: List[Node[(Seed, Option[B])]]): Tree[(Seed, Option[B])] = {
+          remaining match {
+            case LazyList.Cons(head, tail) =>
+              val hd = head()
+              val (seed, oeab) = hd.value
+              oeab match {
+                case Some(Left(a)) =>
+                  loop(size, LazyList.cons(f(a).run(size, seed), hd.children.value) ++ tail(), stack)
+                case Some(Right(b)) =>
+                  loop(size, hd.children.value ++ tail(), Node((seed, Some(b): Option[B]), hd.children.value.toList(Int.MaxValue).size) :: stack)
+                case None =>
+                  loop(size, hd.children.value ++ tail(), Node((seed, None: Option[B]), hd.children.value.toList(Int.MaxValue).size) :: stack)
+              }
+            case LazyList.Nil() =>
+              @annotation.tailrec
+              def build(stack: List[Node[(Seed, Option[B])]], out: List[Tree[(Seed, Option[B])]]): Tree[(Seed, Option[B])] = {
+                stack match {
+                  case Node(v, size) :: tail =>
+                    val t = Tree(v, Identity(LazyList.fromList(out.take(size))))
+                    build(tail, t :: out.drop(size))
+                  case Nil => 
+                    out.head
+                }
+              }
+              build(stack, Nil)
+          }
         }
+        GenT[B]((size, seed) => loop(size, LazyList.cons(f(a).run(size, seed), LazyList.nil), Nil))
+      }
     }
 }

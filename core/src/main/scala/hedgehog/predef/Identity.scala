@@ -41,11 +41,13 @@ object Identity {
       override def bind[A, B](fa: Identity[A])(f: A => Identity[B]): Identity[B] =
         Identity(f(fa.value).value)
 
-      // FIXME: This is not stack safe.
-      override def tailRecM[A, B](a: A)(f: A => Identity[Either[A, B]]): Identity[B] =
-        bind(f(a)) {
-          case Left(value) => tailRecM(value)(f)
-          case Right(value) => point(value)
-        }
+      override def tailRecM[A, B](a: A)(f: A => Identity[Either[A, B]]): Identity[B] = {
+        def loop(a: A): B =
+          f(a).value match {
+            case Left(a) => loop(a)
+            case Right(b) => b
+          }
+        Identity(loop(a))
+      }
     }
 }
